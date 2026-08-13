@@ -1891,26 +1891,5 @@ try {
 
 ---
 
-### 13.6 Rilis Versi 0.2.6, Unit Testing (`unittests/`) & Berkas Spesifikasi Arsitektur
-
-Paket `@badriana/ai-core` versi **0.2.6** membawa peningkatan stabilitas, kejujuran data 100%, dan pengujian sistem menyeluruh:
-
-1. **Kejujuran Data Gambar 100% (Zero Synthetic Fabrication)**:
-   - Pembuatan potongan gambar SVG sintetis palsu telah dihapus total. Jika dokumen PDF tidak memiliki *stream* biner gambar visual asli, paket **hanya membuat `TextChunk[]` tanpa memalsukan elemen gambar**.
-2. **Pengetatan Regex Caption Bernomor**:
-   - Pencocokan caption gambar memperhitungkan pola nomor jangkar (`Gambar 1:`, `Diagram 2:`) untuk mencegah paragraf teks narasi terdeteksi sebagai judul gambar.
-3. **Pengujian Unit Testing Terpusat (`unittests/`)**:
-   - Seluruh modul di `src/` diuji secara ketat oleh **60 Unit Test Cases** di folder `unittests/`.
-   - Jalankan unit test kapan saja dengan perintah:
-     ```bash
-     npm test        # Single run (60/60 PASSED)
-     npx vitest      # Interactive watch mode
-     ```
-4. **Dokumentasi Resmi Tambahan**:
-   - 🏛️ **[`ARSITEKTUR.md`](file:///D:/badri/npm/ai-core/ARSITEKTUR.md)**: Spesifikasi arsitektur 5-layer, data flow, dan skema interface TypeScript.
-   - 💼 **[`BISNIS.md`](file:///D:/badri/npm/ai-core/BISNIS.md)**: Arsitektur alur bisnis, model monetisasi, dan studi kasus enterprise.
-
----
-
-Selamat! Anda kini memiliki **Katalog Lengkap, Urutan Terstruktur Logis, Dukungan Universal Backend, Kesiapan Skala Produksi, & Dokumentasi Terkuat `@badriana/ai-core` v0.2.6** yang 100% transparan, terstruktur, dan siap digunakan untuk pembangunan aplikasi AI di Next.js, Express.js, NestJS, Fastify, maupun Deno/Bun! 🎉
+Selamat! Anda kini memiliki **Katalog Lengkap, Urutan Terstruktur Logis, Dukungan Universal Backend, Kesiapan Skala Produksi, & Dokumentasi Terkuat `@badriana/ai-core`** yang 100% transparan, terstruktur, dan siap digunakan untuk pembangunan aplikasi AI di Next.js, Express.js, NestJS, Fastify, maupun Deno/Bun! 🎉
 
