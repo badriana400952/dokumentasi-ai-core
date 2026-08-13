@@ -1891,5 +1891,35 @@ try {
 
 ---
 
+#info
+
+Untuk mengetahui apakah kesalahan berada di ai-core atau di aiService.ts (Backend Service), kita bisa melihat pembagian tugas (Tanggung Jawab Logika) dari hasil output yang Anda
+  tampilkan:
+  ──────
+  ### 🧱 1. Tanggung Jawab @badriana/ai-core (Core Library)
+
+  ai-core bertanggung jawab atas pembentukan data mentah awal dari dokumen PDF.
+
+   Kesalahan yang Terjadi                                               |                      Yang Bersalah                      | Alasan
+  ----------------------------------------------------------------------|---------------------------------------------------------|----------------------------------------------------------
+   Teks PDF terpotong di tengah kata                                    |                         ai-core                         | Logika splitter di ai-core kurang presisi.
+   Gambar PDF tidak terdeteksi / terkorupsi (eJzs)                      |                         ai-core                         | Pemindai biner pdf.ts di ai-core melewatkan magic bytes.
+   Ada teks sintetis bawaan seperti "Tangkapan layar / gambar diagram:" |                         ai-core                         | Dihasilkan oleh generator diagram di createDocument.ts.
+   Teks header PDF penanda halaman (-- 1 of 320 --) terbawa             |                         ai-core                         | Parser pdf.ts di ai-core tidak memfilter regex header.
+  ──────
+  ### ⚙️ 2. Tanggung Jawab aiService.ts (Backend Service Proyek)
+
+  aiService.ts bertanggung jawab atas penyimpanan ke Database, pencarian RAG, dan perangkaian jawaban AI.
+
+   Kesalahan yang Terjadi                                       |                      Yang Bersalah                       | Alasan
+  --------------------------------------------------------------|----------------------------------------------------------|-----------------------------------------------------------------
+   Skor kemiripan Vektor Cosine terlalu rendah / terlalu tinggi |                       aiService.ts                       | Pengaturan ambang batas relevansi (score >= 0.20) di aiService.
+   Gambar yang ditampilkan ke user rusak / URL null             |                       aiService.ts                       | Logika pemetaan URL Cloudinary ke Database di aiService.
+   Gambar 2 ikut muncul padahal user hanya minta Gambar 1       |                       aiService.ts                       | Logika pencocokan nomor kueri (numberMatch) di aiService.
+   AI menjawab "Saya tidak tahu" padahal konteks ada            |                       aiService.ts                       | Logika fallback dan perangkaian prompt di aiService.
+  ──────
+  ### 🔍 Contoh Kasus Real dari Output Log Anda:
+
+
 Selamat! Anda kini memiliki **Katalog Lengkap, Urutan Terstruktur Logis, Dukungan Universal Backend, Kesiapan Skala Produksi, & Dokumentasi Terkuat `@badriana/ai-core`** yang 100% transparan, terstruktur, dan siap digunakan untuk pembangunan aplikasi AI di Next.js, Express.js, NestJS, Fastify, maupun Deno/Bun! 🎉
 
