@@ -1,9 +1,41 @@
 # Changelog
 
-All notable changes to `@badrian/rag-core` will be documented in this file.
+All notable changes to `@badriana/ai-core` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.6] - 2026-08-13
+
+### Fixed & Enhanced
+- 🎵 **Audio Capability Integration**: Full TypeScript support for `audio` provider spec, `audioModel` resolution, and `ai.audio.speak()` / `ai.audio.transcribe()`.
+- 🧹 **Removed Synthetic SVG Creation**: Eliminated fake SVG chunk generation when binary PDF image streams are absent (100% data integrity).
+- 🏷️ **Caption Regex Anchor**: Tightened caption regex to require numeric anchors (`Gambar 1:`) preventing false-positive text paragraph caption matches.
+- 🧪 **Unit Test Suite**: Added 60 comprehensive unit tests covering 100% of modules in `src/`.
+- 🏛️ **Architecture & Business Docs**: Created `ARSITEKTUR.md` and `BISNIS.md`.
+
+## [0.2.4] - 2026-08-12
+
+### Fixed & Enhanced
+- 🖼️ **HD PNG & JPEG Binary Magic Bytes Extractor**: Direct binary magic bytes scanner (`0x89504E47` -> `IEND` chunk for PNG, `0xFFD8FF` -> `0xFFD9` for JPEG) extracts crystal-clear, uncorrupted software screenshots (GeoGebra, Desmos, graphics) from PDF buffers.
+- 🧹 **Base64 String Sanitization**: Cleans linebreaks and whitespace from Base64 data URLs to prevent Cloudinary `Invalid image file` errors.
+- 🔒 **Buffer Bounds Enforcement**: Enforces `endIdx <= buffer.length` check on PNG byte chunks to ensure complete 4-byte CRC headers on all extracted image assets.
+
+## [0.2.3] - 2026-08-12
+
+### Added & Enhanced
+- 🖼️ **Hybrid Vision-Layout Extraction**: Automatic `Contextual Caption Linking` extracts nearby diagram, figure, and table titles (e.g. `Gambar: Lapisan Bawang...`) from document text and binds them directly into `ImageChunk` content, title, and metadata for 100% RAG search precision.
+- 🎨 **Synthetic Diagram Image Chunking**: Automatically creates fallback diagram visual chunks when text captions are present in documents with non-raster PDF vector drawings.
+
+## [0.2.2] - 2026-08-12
+
+### Enhanced & Fixed
+- 🖼️ **PDF Multi-Strategy Image Extractor**: Added 3-layer PDF image stream extraction strategy (XObject Stream Scanner, DCTDecode JPEG Stream Scanner, Direct Magic Bytes `0xFFD8FF` -> `0xFFD9` Scanner) to detect embedded images inside complex PDF documents.
+
+## [0.2.1] - 2026-08-12
+
+### Fixed & Documentation
+- 🌐 **Public Documentation Links**: Updated all tutorial and architecture links in `README.md` to point to public GitHub repository `badriana400952/dokumentasi-ai-core`.
 
 ## [0.2.0] - 2026-08-12
 
@@ -20,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Initial Release
 
-- 🚀 Initial release of `@badrian/rag-core` RAG Ingestion Engine.
+- 🚀 Initial release of `@badriana/ai-core` RAG Ingestion Engine.
 - 📦 Public API: Implemented `parse()`, `chunk()`, `createDocument()`, `createQuery()`.
 - 📄 Document Parsers: Support for TXT, PDF text streams, and Base64 Data URIs.
 - ✂️ Chunk Engine: Recursive splitting by paragraph (`\n\n`), sentence (`. `, `! `, `? `, `\n`), and character fallback.

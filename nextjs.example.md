@@ -1,39 +1,45 @@
-# ⚛️ Panduan Arsitektur Enterprise Next.js (App Router): Route Handlers ➔ Controller / Action ➔ Service ➔ Repository (Powered by `@badriana/ai-core`)
+# ⚛️ Panduan Arsitektur Enterprise Next.js App Router (14/15): Route Handlers ➔ Service ➔ Repository (Powered by `@badriana/ai-core`)
 
-Dokumen ini berisi panduan arsitektur **Clean Enterprise Layered Architecture (Route Handlers / Actions - Service - Repository)** untuk aplikasi full-stack berbasis **Next.js 14/15 (App Router & TypeScript)** yang memanfaatkan paket `@badriana/ai-core` secara 100% komprehensif (Upload File PDF RAG, Ingesti Database 40+ Tabel, Ingesti Teks Knowledge Manual, Multimodal Vision Chat, Streaming Chat SSE, Text-to-Speech MP3, & Speech-to-Text).
+Dokumen ini berisi panduan arsitektur **Clean Enterprise Layered Architecture (App Router Route Handlers - Service - Repository)** untuk aplikasi full-stack berbasis **Next.js 14/15 (App Router & TypeScript)** yang menggunakan paket `@badriana/ai-core` secara 100% komprehensif, mengadaptasi logika bisnis dari proyek `tes-si-core/backend` ke dalam pola idiomatik Next.js (App Router Route Handlers, `NextRequest` & `NextResponse`, Web Standard `ReadableStream` untuk Streaming SSE, `formData()` Native, & Prisma ORM).
 
 ---
 
-## 🏗️ Struktur Folder Proyek Backend Next.js App Router
+## 🏗️ Struktur Folder Proyek Next.js App Router
 
 ```text
-my-nextjs-ai-app/
+tes-si-core-nextjs/
 ├── src/
 │   ├── app/
 │   │   ├── api/
-│   │   │   ├── ai/
-│   │   │   │   ├── ingest-file/
-│   │   │   │   │   └── route.ts          # Route Handler Ingesti File PDF/Teks
-│   │   │   │   ├── ingest-manual/
-│   │   │   │   │   └── route.ts          # Route Handler Ingesti Teks Knowledge Manual / SOP
-│   │   │   │   ├── ingest-db/
-│   │   │   │   │   └── route.ts          # Route Handler Ingesti Database
-│   │   │   │   ├── chat/
-│   │   │   │   │   └── route.ts          # Route Handler RAG & Vision Chat
-│   │   │   │   ├── chat-stream/
-│   │   │   │   │   └── route.ts          # Route Handler Streaming Chat SSE
-│   │   │   │   └── audio/
-│   │   │   │       ├── speak/
-│   │   │   │       │   └── route.ts      # Route Handler Text-to-Speech (MP3)
-│   │   │   │       └── transcribe/
-│   │   │   │           └── route.ts      # Route Handler Speech-to-Text
-│   │   └── page.tsx                      # Client Component UI React Next.js
+│   │   │   └── v1/
+│   │   │       ├── admin/
+│   │   │       │   ├── ingest-file/
+│   │   │       │   │   └── route.ts       # POST Route Handler: Upload File PDF/TXT (formData)
+│   │   │       │   ├── ingest-manual/
+│   │   │       │   │   └── route.ts       # POST Route Handler: Input Teks Knowledge Manual / SOP
+│   │   │       │   └── ingest-db/
+│   │   │       │       └── route.ts       # POST Route Handler: Ingesti Baris Database
+│   │   │       └── user/
+│   │   │           ├── chat/
+│   │   │           │   └── route.ts       # POST Route Handler: RAG & Multimodal Vision Chat
+│   │   │           ├── chat-stream/
+│   │   │           │   └── route.ts       # POST Route Handler: Real-Time SSE Chat Streaming
+│   │   │           └── audio/
+│   │   │               ├── speak/
+│   │   │               │   └── route.ts   # POST Route Handler: Text-to-Speech (MP3 Buffer)
+│   │   │               └── transcribe/
+│   │   │                   └── route.ts   # POST Route Handler: Speech-to-Text Whisper
+│   │   └── page.tsx                       # Client Component UI Dashboard (Admin & User Portal)
 │   └── lib/
-│       ├── ai.ts                         # Singleton Instance Client @badriana/ai-core
+│       ├── ai.ts                          # Singleton Instance Client @badriana/ai-core
+│       ├── prisma.ts                      # Singleton Instance Client Prisma ORM
+│       ├── cloudinary.ts                  # Integrasi Storage Gambar Publik Cloudinary
 │       ├── repositories/
-│       │   └── knowledgeRepository.ts    # Layer Access Database (PostgreSQL pgvector)
+│       │   └── knowledgeRepository.ts     # Layer Akses Database & Cosine Similarity Vector Search
 │       └── services/
-│           └── aiService.ts              # Business Logic Layer @badriana/ai-core
+│           └── aiService.ts               # Layer Logika Bisnis Utama (@badriana/ai-core)
+├── prisma/
+│   └── schema.prisma                      # Skema Tabel Document & KnowledgeChunk
 ├── package.json
 ├── tsconfig.json
 └── .env.local
@@ -43,20 +49,28 @@ my-nextjs-ai-app/
 
 ## 1. ⚙️ Layer Konfigurasi Client AI (`src/lib/ai.ts`)
 
+Menggunakan instance terpusat `@badriana/ai-core` di lingkungan Next.js Server-Side:
+
 ```typescript
 // src/lib/ai.ts
 import { createAI } from "@badriana/ai-core";
 
-if (!process.env.OPENROUTER_API_KEY) {
+const apiKey = process.env.OPENROUTER_API_KEY;
+if (!apiKey) {
   throw new Error("❌ OPENROUTER_API_KEY belum diset pada environment variables (.env.local)!");
 }
 
 export const ai = createAI({
   provider: "openrouter",
-  apiKey: process.env.OPENROUTER_API_KEY,
-  chatModel: "google/gemma-2-9b-it:free",
-  embeddingModel: "openai/text-embedding-3-small",
-  visionModel: "meta-llama/llama-3.2-11b-vision-instruct:free",
+  apiKey: apiKey,
+  chatModel: process.env.AI_CHAT_MODEL || "google/gemma-2-9b-it:free",
+  embeddingModel: process.env.AI_EMBEDDING_MODEL || "openai/text-embedding-3-small",
+  visionModel: process.env.AI_VISION_MODEL || "meta-llama/llama-3.2-11b-vision-instruct:free",
+});
+
+export const aiAudio = createAI({
+  provider: "openai",
+  apiKey: process.env.OPENAI_API_KEY || apiKey,
 });
 ```
 
@@ -64,58 +78,100 @@ export const ai = createAI({
 
 ## 2. 🗄️ Layer Repository (`src/lib/repositories/knowledgeRepository.ts`)
 
+Layer repository mengolah penyimpanan potongan Vektor Chunk ke database PostgreSQL / SQLite via Prisma ORM:
+
 ```typescript
 // src/lib/repositories/knowledgeRepository.ts
-import { Pool } from "pg";
-import type { Chunk } from "@badriana/ai-core";
-
-export const pgPool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+import { prisma } from "../prisma";
 
 export interface VectorChunkRecord {
   id: string;
-  documentId?: string;
+  documentId?: string | null;
+  type: string;
   content: string;
   similarityScore: number;
+  imageUrl?: string | null;
+  imagePage?: number | null;
 }
 
 export class KnowledgeRepository {
-  async saveChunks(documentId: string, chunks: Chunk[]): Promise<void> {
-    const client = await pgPool.connect();
-    try {
-      await client.query("BEGIN");
-      for (const chunk of chunks) {
-        const query = `
-          INSERT INTO knowledge_chunks (id, document_id, content, embedding)
-          VALUES ($1, $2, $3, $4::vector)
-          ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding;
-        `;
-        await client.query(query, [
-          chunk.id,
+  async saveChunks(
+    documentId: string | null,
+    chunks: readonly {
+      id: string;
+      content: string;
+      type?: string;
+      embedding?: readonly number[];
+      imageUrl?: string | null;
+      imagePage?: number | null;
+    }[]
+  ): Promise<void> {
+    for (const chunk of chunks) {
+      const emb = chunk.embedding ? Array.from(chunk.embedding) : [];
+      await prisma.knowledgeChunk.upsert({
+        where: { id: chunk.id },
+        update: {
+          content: chunk.content,
+          embedding: JSON.stringify(emb),
           documentId,
-          chunk.content,
-          JSON.stringify(chunk.embedding),
-        ]);
-      }
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
+          type: chunk.type ?? "text",
+          imageUrl: chunk.imageUrl ?? null,
+          imagePage: chunk.imagePage ?? null,
+        },
+        create: {
+          id: chunk.id,
+          documentId,
+          type: chunk.type ?? "text",
+          content: chunk.content,
+          embedding: JSON.stringify(emb),
+          imageUrl: chunk.imageUrl ?? null,
+          imagePage: chunk.imagePage ?? null,
+        },
+      });
     }
   }
 
   async searchSimilarChunks(questionVector: number[], limit: number = 5): Promise<VectorChunkRecord[]> {
-    const query = `
-      SELECT id, document_id AS "documentId", content, 1 - (embedding <=> $1::vector) AS "similarityScore"
-      FROM knowledge_chunks
-      ORDER BY embedding <=> $1::vector
-      LIMIT $2;
-    `;
-    const result = await pgPool.query(query, [JSON.stringify(questionVector), limit]);
-    return result.rows;
+    const allChunks = await prisma.knowledgeChunk.findMany();
+
+    const scoredChunks = allChunks.map((chunk) => {
+      let chunkVector: number[] = [];
+      try {
+        chunkVector = JSON.parse(chunk.embedding);
+      } catch (e) {
+        chunkVector = [];
+      }
+
+      const score = this.calculateCosineSimilarity(questionVector, chunkVector);
+      return {
+        id: chunk.id,
+        documentId: chunk.documentId,
+        type: chunk.type,
+        content: chunk.content,
+        similarityScore: score,
+        imageUrl: chunk.imageUrl,
+        imagePage: chunk.imagePage,
+      };
+    });
+
+    scoredChunks.sort((a, b) => b.similarityScore - a.similarityScore);
+    return scoredChunks.slice(0, limit);
+  }
+
+  private calculateCosineSimilarity(vecA: number[], vecB: number[]): number {
+    if (!vecA.length || !vecB.length || vecA.length !== vecB.length) return 0;
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+      const a = vecA[i] ?? 0;
+      const b = vecB[i] ?? 0;
+      dotProduct += a * b;
+      normA += a * a;
+      normB += b * b;
+    }
+    if (normA === 0 || normB === 0) return 0;
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 }
 ```
@@ -124,223 +180,208 @@ export class KnowledgeRepository {
 
 ## 3. 🧠 Layer Service (`src/lib/services/aiService.ts`)
 
+Layer service yang melakukan pemanggilan API `@badriana/ai-core`:
+
 ```typescript
 // src/lib/services/aiService.ts
-import { 
-  createDocument, 
-  createQuery, 
-  formatDataRecordsForIngestion 
-} from "@badriana/ai-core";
-import { ai } from "../ai.js";
-import { KnowledgeRepository } from "../repositories/knowledgeRepository.js";
+import { createDocument } from "@badriana/ai-core";
+import { ai, aiAudio } from "../ai";
+import { prisma } from "../prisma";
+import { uploadImageToCloudinary } from "../cloudinary";
+import { KnowledgeRepository } from "../repositories/knowledgeRepository";
+
+const RAG_MIN_SCORE = parseFloat(process.env.RAG_MIN_SCORE ?? "0.15") || 0.15;
 
 export class AIService {
-  private knowledgeRepo: KnowledgeRepository;
+  private knowledgeRepo = new KnowledgeRepository();
 
-  constructor() {
-    this.knowledgeRepo = new KnowledgeRepository();
+  private async getEmbeddings(texts: readonly string[]): Promise<number[][]> {
+    const embRes = await ai.embedding.create({ input: texts });
+    return "embeddings" in embRes
+      ? embRes.embeddings.map((e) => Array.from(e))
+      : [Array.from(embRes.embedding)];
   }
 
+  /**
+   * 1. Ingesti Berkas PDF/TXT
+   */
   async ingestUploadedFile(fileBuffer: Buffer, filename: string) {
+    const docMeta = await prisma.document.create({ data: { filename } });
+
     const docResult = await createDocument({
       source: fileBuffer,
       filename,
-      embedder: async (texts) => {
-        const embRes = await ai.embedding.create({ input: texts });
-        return "embeddings" in embRes ? embRes.embeddings : [embRes.embedding];
-      },
+      filterCoverImages: false,
+      minImageDimension: 80,
+      embedder: async (texts) => await this.getEmbeddings(texts),
     });
 
-    await this.knowledgeRepo.saveChunks(docResult.document.id, docResult.chunks);
+    const chunksToSave = docResult.chunks.map((chunk) => ({
+      id: chunk.id,
+      content: chunk.content,
+      embedding: chunk.embedding,
+      type: chunk.type,
+      imageUrl: null,
+      imagePage: null,
+    }));
 
-    return {
-      documentId: docResult.document.id,
-      chunksCount: docResult.chunks.length,
-      stats: docResult.stats,
-    };
+    await this.knowledgeRepo.saveChunks(docMeta.id, chunksToSave);
+    return { document: docMeta, stats: docResult.stats, chunksCount: chunksToSave.length };
   }
 
-  async ingestManualKnowledgeText(title: string, content: string) {
-    const docResult = await createDocument({
-      source: content,
-      filename: `${title.replace(/\s+/g, "_")}.txt`,
-      embedder: async (texts) => {
-        const embRes = await ai.embedding.create({ input: texts });
-        return "embeddings" in embRes ? embRes.embeddings : [embRes.embedding];
-      },
-    });
+  /**
+   * 2. Tanya Jawab AI Chat RAG
+   */
+  async generateChatAnswer(question: string) {
+    const questionEmbeddings = await this.getEmbeddings([question]);
+    const questionVector = questionEmbeddings[0] ?? [];
 
-    await this.knowledgeRepo.saveChunks(docResult.document.id, docResult.chunks);
+    const similarChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 5);
+    const relevantChunks = similarChunks.filter((c) => c.similarityScore >= RAG_MIN_SCORE);
 
-    return {
-      documentId: docResult.document.id,
-      chunksCount: docResult.chunks.length,
-      stats: docResult.stats,
-    };
-  }
+    const contexts = relevantChunks.map((c) => ({
+      id: c.id,
+      content: c.content,
+      source: { filename: `Document ${c.documentId ?? 'Knowledge'}` },
+    }));
 
-  async ingestCompanyDatabaseRecords(records: any[], tableName: string) {
-    const formattedText = formatDataRecordsForIngestion(records, {
-      recordTitlePrefix: `[Record Tabel ${tableName}]`,
-      excludeKeys: ["password", "secret", "auth_token", "credit_card"],
-    });
-
-    const docResult = await createDocument({
-      source: formattedText,
-      filename: `db_table_${tableName}.txt`,
-      embedder: async (texts) => {
-        const embRes = await ai.embedding.create({ input: texts });
-        return "embeddings" in embRes ? embRes.embeddings : [embRes.embedding];
-      },
-    });
-
-    await this.knowledgeRepo.saveChunks(docResult.document.id, docResult.chunks);
-
-    return {
-      tableName,
-      recordsProcessed: records.length,
-      chunksGenerated: docResult.chunks.length,
-    };
-  }
-
-  async generateChatAnswer(question: string, imageBase64?: string) {
-    const embRes = await ai.embedding.create({ input: question });
-    const questionVector = "embedding" in embRes ? embRes.embedding : embRes.embeddings[0]!;
-
-    const candidateChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 10);
-
-    const queryResult = createQuery({
-      vector: questionVector,
-      keyword: question,
-      chunks: candidateChunks.map((c) => ({
-        id: c.id,
-        type: "text",
-        index: 0,
-        startOffset: 0,
-        endOffset: c.content.length,
-        content: c.content,
-      })),
-      limit: 5,
-    });
-
-    const chatOutput = await ai.chat.generate({
+    const answer = await ai.chat.generate({
       question,
-      contexts: queryResult.rankedChunks,
-      images: imageBase64 ? [{ dataUrl: imageBase64 }] : undefined,
+      contexts,
     });
 
     return {
-      answer: chatOutput.text,
-      imageAnalysis: chatOutput.imageAnalysis,
-      citations: chatOutput.citations,
-      usage: chatOutput.usage,
-      raw: chatOutput.raw,
+      answer: answer.text,
+      model: answer.model,
+      usage: answer.usage,
+      citations: answer.citations,
     };
   }
 
+  /**
+   * 3. Streaming Chat SSE RAG untuk ReadableStream Next.js App Router
+   */
   async streamChatAnswer(question: string, onChunk: (text: string) => void) {
-    const embRes = await ai.embedding.create({ input: question });
-    const questionVector = "embedding" in embRes ? embRes.embedding : embRes.embeddings[0]!;
+    const questionEmbeddings = await this.getEmbeddings([question]);
+    const questionVector = questionEmbeddings[0] ?? [];
 
-    const candidateChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 5);
+    const similarChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 5);
+    const contexts = similarChunks.map((c) => ({ id: c.id, content: c.content }));
 
-    return await ai.chat.stream({
-      question,
-      contexts: candidateChunks.map((c) => ({
-        id: c.id,
-        type: "text",
-        index: 0,
-        startOffset: 0,
-        endOffset: c.content.length,
-        content: c.content,
-      })),
-      onChunk: (chunk) => onChunk(chunk.text),
-    });
-  }
-
-  async textToSpeech(text: string, voice: "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" = "nova") {
-    return await ai.audio.speak({ text, voice });
-  }
-
-  async speechToText(audioBase64: string, language: string = "id") {
-    return await ai.audio.transcribe({ file: audioBase64, language });
+    const stream = await ai.chat.stream({ question, contexts });
+    for await (const chunk of stream) {
+      onChunk(chunk.text);
+    }
   }
 }
 ```
 
 ---
 
-## 4. 🌐 Next.js App Router Route Handlers (`app/api/.../route.ts`)
+## 4. 🚀 Next.js App Router Route Handlers (`src/app/api/.../route.ts`)
 
-### 📌 4.1 Ingesti File PDF (`src/app/api/ai/ingest-file/route.ts`):
+### A. Upload File PDF/TXT Route Handler (`src/app/api/v1/admin/ingest-file/route.ts`)
+Menggunakan Web Standard `NextRequest` dan `request.formData()` untuk menerima file biner:
+
 ```typescript
+// src/app/api/v1/admin/ingest-file/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { AIService } from "@/lib/services/aiService";
 
-const aiService = new AIService();
+export const runtime = "nodejs";
 
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
   try {
-    const formData = await req.formData();
+    const formData = await request.formData();
     const file = formData.get("file") as File | null;
-    if (!file) return NextResponse.json({ success: false, error: "File wajib diunggah!" }, { status: 400 });
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const data = await aiService.ingestUploadedFile(buffer, file.name);
-    return NextResponse.json({ success: true, data });
+    if (!file) {
+      return NextResponse.json({ success: false, error: "File PDF/TXT wajib diunggah!" }, { status: 400 });
+    }
+
+    const bytes = await file.arrayBuffer();
+    const buffer = Buffer.from(bytes);
+
+    const aiService = new AIService();
+    const result = await aiService.ingestUploadedFile(buffer, file.name);
+
+    return NextResponse.json({ success: true, data: result });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
 ```
 
-### 📌 4.2 Ingesti Manual Teks (`src/app/api/ai/ingest-manual/route.ts`):
+---
+
+### B. User Chat RAG Route Handler (`src/app/api/v1/user/chat/route.ts`)
+
 ```typescript
+// src/app/api/v1/user/chat/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { AIService } from "@/lib/services/aiService";
 
-const aiService = new AIService();
-
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
   try {
-    const { title, content } = await req.json();
-    if (!title || !content) return NextResponse.json({ success: false, error: "Parameter title dan content wajib diisi!" }, { status: 400 });
+    const body = await request.json();
+    const { question } = body;
 
-    const data = await aiService.ingestManualKnowledgeText(title, content);
-    return NextResponse.json({ success: true, data });
+    if (!question) {
+      return NextResponse.json({ success: false, error: "Parameter 'question' wajib diisi!" }, { status: 400 });
+    }
+
+    const aiService = new AIService();
+    const result = await aiService.generateChatAnswer(question);
+
+    return NextResponse.json({ success: true, data: result });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
 ```
 
-### 📌 4.3 Chat Stream SSE (`src/app/api/ai/chat-stream/route.ts`):
+---
+
+### C. Real-Time SSE Chat Streaming Route Handler (`src/app/api/v1/user/chat-stream/route.ts`)
+Menggunakan Web Standard `ReadableStream` & `TextEncoder` khas Next.js App Router:
+
 ```typescript
+// src/app/api/v1/user/chat-stream/route.ts
 import { NextRequest } from "next/server";
 import { AIService } from "@/lib/services/aiService";
 
-const aiService = new AIService();
+export const runtime = "nodejs";
 
-export async function POST(req: NextRequest) {
-  const { question } = await req.json();
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+  const { question } = body;
+
   const encoder = new TextEncoder();
+  const aiService = new AIService();
 
-  const customStream = new ReadableStream({
+  const stream = new ReadableStream({
     async start(controller) {
-      await aiService.streamChatAnswer(question, (chunkText) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: chunkText })}\n\n`));
-      });
-      controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
-      controller.close();
+      try {
+        await aiService.streamChatAnswer(question, (chunkText) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: chunkText })}\n\n`));
+        });
+        controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+        controller.close();
+      } catch (err: any) {
+        controller.error(err);
+      }
     },
   });
 
-  return new Response(customStream, {
+  return new Response(stream, {
     headers: {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-cache, no-transform",
       "Connection": "keep-alive",
     },
   });
 }
 ```
+
+---
+*Dokumentasi Arsitektur Resmi Next.js App Router (`@badriana/ai-core`)*

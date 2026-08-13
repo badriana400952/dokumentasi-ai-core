@@ -1,25 +1,31 @@
 # 🚀 Panduan Arsitektur Enterprise Express.js: Router ➔ Controller ➔ Service ➔ Repository (Powered by `@badriana/ai-core`)
 
-Dokumen ini berisi panduan arsitektur **Clean Layered Architecture (Router - Controller - Service - Repository)** untuk aplikasi backend berbasis **Express.js & TypeScript** yang menggunakan paket `@badriana/ai-core` secara 100% komprehensif (Upload File PDF RAG, Ingesti Database 40+ Tabel, Ingesti Teks Knowledge Manual, Multimodal Vision Chat, Streaming Chat SSE, Text-to-Speech MP3, & Speech-to-Text).
+Dokumen ini berisi panduan arsitektur **Clean Layered Architecture (Router - Controller - Service - Repository)** untuk aplikasi backend berbasis **Express.js & TypeScript** yang menggunakan paket `@badriana/ai-core` secara 100% komprehensif, berdasarkan implementasi nyata dari proyek `tes-si-core/backend`.
 
 ---
 
 ## 🏗️ Struktur Folder Proyek Backend Express.js
 
 ```text
-my-express-ai-app/
+tes-si-core-backend/
 ├── src/
 │   ├── config/
-│   │   └── ai.ts                    # Single Instance Client @badriana/ai-core
+│   │   ├── ai.ts                    # Single Instance Client @badriana/ai-core & OpenRouter
+│   │   ├── prisma.ts                # Client ORM Prisma Database (PostgreSQL / SQLite)
+│   │   └── cloudinary.ts            # Integrasi Storage Gambar Publik Cloudinary
 │   ├── repositories/
-│   │   └── knowledgeRepository.ts   # Layer Akses Database (PostgreSQL pgvector / Supabase)
+│   │   └── knowledgeRepository.ts   # Layer Akses Database & Cosine Similarity Vector Search
 │   ├── services/
-│   │   └── aiService.ts             # Layer Logika Bisnis & Fitur @badriana/ai-core
+│   │   └── aiService.ts             # Layer Logika Bisnis Utama (Delegasi Murni @badriana/ai-core)
 │   ├── controllers/
-│   │   └── aiController.ts          # Layer Handler HTTP Req/Res & Validasi Input
+│   │   ├── adminController.ts       # Handler HTTP Admin (Ingesti File, Ingesti Text, Ingesti DB)
+│   │   └── userController.ts        # Handler HTTP User (Chat RAG, Streaming SSE, TTS MP3, STT)
 │   ├── routes/
-│   │   └── aiRoutes.ts              # Layer Routing REST API Endpoint Express
+│   │   ├── adminRoutes.ts           # Route Express Prefix /api/v1/admin
+│   │   └── userRoutes.ts            # Route Express Prefix /api/v1/user
 │   └── server.ts                    # Entry Point Utama Express.js Server
+├── prisma/
+│   └── schema.prisma                # Skema Tabel Document & KnowledgeChunk
 ├── package.json
 ├── tsconfig.json
 └── .env
@@ -29,22 +35,28 @@ my-express-ai-app/
 
 ## 1. ⚙️ Layer Konfigurasi Client AI (`src/config/ai.ts`)
 
-File ini bertanggung jawab menginisialisasi client `@badriana/ai-core` sebagai *singleton instance* yang siap digunakan di seluruh layer aplikasi.
+Inisialisasi instance terpusat `@badriana/ai-core` dengan per-capability provider:
 
 ```typescript
 // src/config/ai.ts
 import { createAI } from "@badriana/ai-core";
 
-if (!process.env.OPENROUTER_API_KEY) {
+const apiKey = process.env.OPENROUTER_API_KEY;
+if (!apiKey) {
   throw new Error("❌ OPENROUTER_API_KEY belum diset pada environment variables (.env)!");
 }
 
 export const ai = createAI({
   provider: "openrouter",
-  apiKey: process.env.OPENROUTER_API_KEY,
-  chatModel: "google/gemma-2-9b-it:free",
-  embeddingModel: "openai/text-embedding-3-small",
-  visionModel: "meta-llama/llama-3.2-11b-vision-instruct:free",
+  apiKey: apiKey,
+  chatModel: process.env.AI_CHAT_MODEL || "google/gemma-2-9b-it:free",
+  embeddingModel: process.env.AI_EMBEDDING_MODEL || "openai/text-embedding-3-small",
+  visionModel: process.env.AI_VISION_MODEL || "meta-llama/llama-3.2-11b-vision-instruct:free",
+});
+
+export const aiAudio = createAI({
+  provider: "openai",
+  apiKey: process.env.OPENAI_API_KEY || apiKey,
 });
 ```
 
@@ -52,66 +64,106 @@ export const ai = createAI({
 
 ## 2. 🗄️ Layer Repository (`src/repositories/knowledgeRepository.ts`)
 
-Layer ini menangani komunikasi langsung dengan database (misal: PostgreSQL dengan ekstensi `pgvector`). Layer ini menyimpan vektor embedding 1536-dimensi dan melakukan pencarian Cosine Similarity (`<=>`).
+Layer ini menangani penyimpanan potongan Vektor Chunk ke database via Prisma ORM dan melakukan perhitungan Cosine Similarity:
 
 ```typescript
 // src/repositories/knowledgeRepository.ts
-import { Pool } from "pg";
-import type { Chunk } from "@badriana/ai-core";
-
-export const pgPool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+import { prisma } from "../config/prisma.js";
 
 export interface VectorChunkRecord {
   id: string;
-  documentId?: string;
+  documentId?: string | null;
+  type: string;
   content: string;
   similarityScore: number;
+  imageUrl?: string | null;
+  imagePage?: number | null;
 }
 
 export class KnowledgeRepository {
   /**
-   * Menyimpan daftar Chunks RAG hasil createDocument() ke tabel Database
+   * Menyimpan Chunks RAG hasil createDocument() ke tabel Database KnowledgeChunk
    */
-  async saveChunks(documentId: string, chunks: Chunk[]): Promise<void> {
-    const client = await pgPool.connect();
-    try {
-      await client.query("BEGIN");
-      for (const chunk of chunks) {
-        const query = `
-          INSERT INTO knowledge_chunks (id, document_id, content, embedding)
-          VALUES ($1, $2, $3, $4::vector)
-          ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding;
-        `;
-        await client.query(query, [
-          chunk.id,
+  async saveChunks(
+    documentId: string | null,
+    chunks: readonly {
+      id: string;
+      content: string;
+      type?: string;
+      embedding?: readonly number[];
+      imageUrl?: string | null;
+      imagePage?: number | null;
+    }[]
+  ): Promise<void> {
+    for (const chunk of chunks) {
+      const emb = chunk.embedding ? Array.from(chunk.embedding) : [];
+      await prisma.knowledgeChunk.upsert({
+        where: { id: chunk.id },
+        update: {
+          content: chunk.content,
+          embedding: JSON.stringify(emb),
           documentId,
-          chunk.content,
-          JSON.stringify(chunk.embedding),
-        ]);
-      }
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
+          type: chunk.type ?? "text",
+          imageUrl: chunk.imageUrl ?? null,
+          imagePage: chunk.imagePage ?? null,
+        },
+        create: {
+          id: chunk.id,
+          documentId,
+          type: chunk.type ?? "text",
+          content: chunk.content,
+          embedding: JSON.stringify(emb),
+          imageUrl: chunk.imageUrl ?? null,
+          imagePage: chunk.imagePage ?? null,
+        },
+      });
     }
   }
 
   /**
-   * Mencari Chunks paling relevan menggunakan pencarian Cosine Similarity (<=>)
+   * Cari Chunks paling relevan berdasarkan Cosine Similarity
    */
   async searchSimilarChunks(questionVector: number[], limit: number = 5): Promise<VectorChunkRecord[]> {
-    const query = `
-      SELECT id, document_id AS "documentId", content, 1 - (embedding <=> $1::vector) AS "similarityScore"
-      FROM knowledge_chunks
-      ORDER BY embedding <=> $1::vector
-      LIMIT $2;
-    `;
-    const result = await pgPool.query(query, [JSON.stringify(questionVector), limit]);
-    return result.rows;
+    const allChunks = await prisma.knowledgeChunk.findMany();
+
+    const scoredChunks = allChunks.map((chunk) => {
+      let chunkVector: number[] = [];
+      try {
+        chunkVector = JSON.parse(chunk.embedding);
+      } catch (e) {
+        chunkVector = [];
+      }
+
+      const score = this.calculateCosineSimilarity(questionVector, chunkVector);
+      return {
+        id: chunk.id,
+        documentId: chunk.documentId,
+        type: chunk.type,
+        content: chunk.content,
+        similarityScore: score,
+        imageUrl: chunk.imageUrl,
+        imagePage: chunk.imagePage,
+      };
+    });
+
+    scoredChunks.sort((a, b) => b.similarityScore - a.similarityScore);
+    return scoredChunks.slice(0, limit);
+  }
+
+  private calculateCosineSimilarity(vecA: number[], vecB: number[]): number {
+    if (!vecA.length || !vecB.length || vecA.length !== vecB.length) return 0;
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+      const a = vecA[i] ?? 0;
+      const b = vecB[i] ?? 0;
+      dotProduct += a * b;
+      normA += a * a;
+      normB += b * b;
+    }
+    if (normA === 0 || normB === 0) return 0;
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 }
 ```
@@ -120,24 +172,18 @@ export class KnowledgeRepository {
 
 ## 3. 🧠 Layer Service (`src/services/aiService.ts`)
 
-Layer Service berisi seluruh **Logika Bisnis AI** yang memanggil API dari `@badriana/ai-core`:
-1. Ingesti Berkas PDF / TXT (`createDocument()`)
-2. Ingesti Teks Knowledge Manual / SOP (`createDocument()`)
-3. Ingesti 40+ Tabel Database SQL Perusahaan (`formatDataRecordsForIngestion()`)
-4. Multimodal Vision Chat (`ai.chat.generate()`) & RRF Reranking (`createQuery()`)
-5. Streaming Response Chat completion SSE (`ai.chat.stream()`)
-6. Text-to-Speech MP3 Stream (`ai.audio.speak()`)
-7. Speech-to-Text Transkripsi Suara (`ai.audio.transcribe()`)
+Service Layer melakukan delegasi murni ke API `@badriana/ai-core` tanpa peretasan regex atau kata kunci palsu:
 
 ```typescript
 // src/services/aiService.ts
-import { 
-  createDocument, 
-  createQuery, 
-  formatDataRecordsForIngestion 
-} from "@badriana/ai-core";
-import { ai } from "../config/ai.js";
+import { createDocument } from "@badriana/ai-core";
+import { ai, aiAudio } from "../config/ai.js";
+import { prisma } from "../config/prisma.js";
+import { uploadImageToCloudinary } from "../config/cloudinary.js";
 import { KnowledgeRepository } from "../repositories/knowledgeRepository.js";
+import { formatDataRecordsForIngestion } from "../utils/formatRecords.js";
+
+const RAG_MIN_SCORE = parseFloat(process.env.RAG_MIN_SCORE ?? "0.15") || 0.15;
 
 export class AIService {
   private knowledgeRepo: KnowledgeRepository;
@@ -146,313 +192,144 @@ export class AIService {
     this.knowledgeRepo = new KnowledgeRepository();
   }
 
+  private async getEmbeddings(texts: readonly string[]): Promise<number[][]> {
+    const embRes = await ai.embedding.create({ input: texts });
+    return "embeddings" in embRes
+      ? embRes.embeddings.map((e) => Array.from(e))
+      : [Array.from(embRes.embedding)];
+  }
+
   /**
-   * 1. Ingesti Berkas PDF/Teks yang diunggah pengguna
+   * 1. Ingesti Berkas PDF/TXT
    */
   async ingestUploadedFile(fileBuffer: Buffer, filename: string) {
+    const docMeta = await prisma.document.create({ data: { filename } });
+    const pendingUploads: { dataUrl: string; counter: number; page?: number }[] = [];
+    let imageCounter = 0;
+
     const docResult = await createDocument({
       source: fileBuffer,
       filename,
-      embedder: async (texts) => {
-        const embRes = await ai.embedding.create({ input: texts });
-        return "embeddings" in embRes ? embRes.embeddings : [embRes.embedding];
+      filterCoverImages: false,
+      minImageDimension: 80,
+      embedder: async (texts) => await this.getEmbeddings(texts),
+      imageProcessor: async (image) => {
+        imageCounter++;
+        pendingUploads.push({ dataUrl: image.dataUrl, counter: imageCounter, page: image.page });
+        let description = image.contextCaption ?? `Gambar ${imageCounter} pada dokumen "${filename}".`;
+        try {
+          const vision = await ai.image.describe(image.dataUrl);
+          description = (vision?.text as string | undefined) || description;
+        } catch {
+          // fallback description
+        }
+        return {
+          content: description,
+          title: image.contextCaption ?? `Gambar ${imageCounter}`,
+          caption: image.contextCaption,
+          kind: "diagram",
+        };
       },
     });
 
-    await this.knowledgeRepo.saveChunks(docResult.document.id, docResult.chunks);
+    const uploaded: { dataUrl: string; url: string | null; page?: number }[] = [];
+    for (const pending of pendingUploads) {
+      const publicId = `doc_${docMeta.id}_img_${pending.counter}`;
+      const url = await uploadImageToCloudinary(pending.dataUrl, publicId).catch(() => null);
+      uploaded.push({ dataUrl: pending.dataUrl, url, page: pending.page });
+    }
 
-    return {
-      documentId: docResult.document.id,
-      chunksCount: docResult.chunks.length,
-      stats: docResult.stats,
-    };
+    const imageUrlMap = new Map<string, { url: string; page?: number }>();
+    for (const up of uploaded) {
+      if (up.url) imageUrlMap.set(up.dataUrl, { url: up.url, page: up.page });
+    }
+
+    const chunksToSave = docResult.chunks.map((chunk) => {
+      if (chunk.type === "image") {
+        const stored = imageUrlMap.get(chunk.image.dataUrl);
+        return {
+          id: chunk.id,
+          content: chunk.content,
+          embedding: chunk.embedding,
+          type: "image",
+          imageUrl: stored?.url || null,
+          imagePage: stored?.page ?? (chunk.metadata?.page as number | undefined) ?? null,
+        };
+      }
+      return {
+        id: chunk.id,
+        content: chunk.content,
+        embedding: chunk.embedding,
+        type: "text",
+        imageUrl: null,
+        imagePage: null,
+      };
+    });
+
+    await this.knowledgeRepo.saveChunks(docMeta.id, chunksToSave);
+    return { document: docMeta, stats: docResult.stats, chunksCount: chunksToSave.length };
   }
 
   /**
-   * 2. Ingesti Teks Knowledge Manual (SOP / Artikel Pengetahuan)
-   */
-  async ingestManualKnowledgeText(title: string, content: string) {
-    const docResult = await createDocument({
-      source: content,
-      filename: `${title.replace(/\s+/g, "_")}.txt`,
-      embedder: async (texts) => {
-        const embRes = await ai.embedding.create({ input: texts });
-        return "embeddings" in embRes ? embRes.embeddings : [embRes.embedding];
-      },
-    });
-
-    await this.knowledgeRepo.saveChunks(docResult.document.id, docResult.chunks);
-
-    return {
-      documentId: docResult.document.id,
-      chunksCount: docResult.chunks.length,
-      stats: docResult.stats,
-    };
-  }
-
-  /**
-   * 3. Ingesti Data dari Database SQL Perusahaan ke RAG Vektor
-   */
-  async ingestCompanyDatabaseRecords(records: any[], tableName: string) {
-    const formattedText = formatDataRecordsForIngestion(records, {
-      recordTitlePrefix: `[Record Tabel ${tableName}]`,
-      excludeKeys: ["password", "secret", "auth_token", "credit_card"],
-    });
-
-    const docResult = await createDocument({
-      source: formattedText,
-      filename: `db_table_${tableName}.txt`,
-      embedder: async (texts) => {
-        const embRes = await ai.embedding.create({ input: texts });
-        return "embeddings" in embRes ? embRes.embeddings : [embRes.embedding];
-      },
-    });
-
-    await this.knowledgeRepo.saveChunks(docResult.document.id, docResult.chunks);
-
-    return {
-      tableName,
-      recordsProcessed: records.length,
-      chunksGenerated: docResult.chunks.length,
-    };
-  }
-
-  /**
-   * 4. Tanya Jawab Multimodal Vision & Hybrid RAG Chat
+   * 2. Tanya Jawab AI Chat RAG
    */
   async generateChatAnswer(question: string, imageBase64?: string) {
-    const embRes = await ai.embedding.create({ input: question });
-    const questionVector = "embedding" in embRes ? embRes.embedding : embRes.embeddings[0]!;
+    const questionEmbeddings = await this.getEmbeddings([question]);
+    const questionVector = questionEmbeddings[0] ?? [];
 
-    const candidateChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 10);
+    const similarChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 5);
+    const relevantChunks = similarChunks.filter((c) => c.similarityScore >= RAG_MIN_SCORE);
 
-    const queryResult = createQuery({
-      vector: questionVector,
-      keyword: question,
-      chunks: candidateChunks.map((c) => ({
-        id: c.id,
-        type: "text",
-        index: 0,
-        startOffset: 0,
-        endOffset: c.content.length,
-        content: c.content,
-      })),
-      limit: 5,
-    });
+    const contexts = relevantChunks.map((c) => ({
+      id: c.id,
+      content: c.content,
+      source: { filename: `Document ${c.documentId ?? 'Knowledge'}`, page: c.imagePage ?? undefined },
+    }));
 
-    const chatOutput = await ai.chat.generate({
+    const answer = await ai.chat.generate({
       question,
-      contexts: queryResult.rankedChunks,
-      images: imageBase64 ? [{ dataUrl: imageBase64 }] : undefined,
+      contexts,
     });
+
+    const relevantImages = relevantChunks
+      .filter((c) => c.type === "image" && c.imageUrl)
+      .map((c) => ({ id: c.id, url: c.imageUrl!, page: c.imagePage ?? undefined }));
 
     return {
-      answer: chatOutput.text,
-      imageAnalysis: chatOutput.imageAnalysis,
-      citations: chatOutput.citations,
-      usage: chatOutput.usage,
-      raw: chatOutput.raw,
+      answer: answer.text,
+      model: answer.model,
+      usage: answer.usage,
+      citations: answer.citations,
+      images: relevantImages,
     };
-  }
-
-  /**
-   * 5. Streaming Chat Completion SSE (Server-Sent Events)
-   */
-  async streamChatAnswer(question: string, onChunk: (text: string) => void) {
-    const embRes = await ai.embedding.create({ input: question });
-    const questionVector = "embedding" in embRes ? embRes.embedding : embRes.embeddings[0]!;
-
-    const candidateChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 5);
-
-    return await ai.chat.stream({
-      question,
-      contexts: candidateChunks.map((c) => ({
-        id: c.id,
-        type: "text",
-        index: 0,
-        startOffset: 0,
-        endOffset: c.content.length,
-        content: c.content,
-      })),
-      onChunk: (chunk) => onChunk(chunk.text),
-    });
-  }
-
-  /**
-   * 6. Text-to-Speech (Sintesis Suara AI)
-   */
-  async textToSpeech(text: string, voice: "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" = "nova") {
-    return await ai.audio.speak({
-      text,
-      voice,
-    });
-  }
-
-  /**
-   * 7. Speech-to-Text (Transkripsi Suara User)
-   */
-  async speechToText(audioBase64: string, language: string = "id") {
-    return await ai.audio.transcribe({
-      file: audioBase64,
-      language,
-    });
   }
 }
 ```
 
 ---
 
-## 4. 🎮 Layer Controller (`src/controllers/aiController.ts`)
+## 4. 🎮 Layer Controller (`src/controllers/adminController.ts` & `userController.ts`)
 
-Layer Controller bertugas menerima **Request HTTP Express (`req`)**, mengesahkan input parameter, memanggil Layer Service, dan mengembalikan **Response HTTP (`res`)**.
+Layer controller mengolah HTTP Request & Response:
 
 ```typescript
-// src/controllers/aiController.ts
+// src/controllers/adminController.ts
 import { Request, Response } from "express";
 import { AIService } from "../services/aiService.js";
 
-export class AIController {
-  private aiService: AIService;
+export class AdminController {
+  private aiService = new AIService();
 
-  constructor() {
-    this.aiService = new AIService();
-  }
-
-  /**
-   * POST /api/v1/ai/ingest-file — Ingesti PDF / File Teks
-   */
   ingestFile = async (req: Request, res: Response): Promise<void> => {
     try {
-      if (!req.file) {
-        res.status(400).json({ success: false, error: "File PDF/Teks wajib diunggah!" });
+      const file: any = req.file || (req.files && Array.isArray(req.files) ? req.files[0] : undefined);
+      if (!file) {
+        res.status(400).json({ success: false, error: "File PDF/TXT wajib diunggah!" });
         return;
       }
 
-      const result = await this.aiService.ingestUploadedFile(
-        req.file.buffer,
-        req.file.originalname
-      );
-
+      const result = await this.aiService.ingestUploadedFile(file.buffer, file.originalname);
       res.status(200).json({ success: true, data: result });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  };
-
-  /**
-   * POST /api/v1/ai/ingest-manual — Ingesti Teks Knowledge Manual / SOP
-   */
-  ingestManual = async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { title, content } = req.body;
-      if (!title || !content) {
-        res.status(400).json({ success: false, error: "Parameter 'title' dan 'content' wajib diisi!" });
-        return;
-      }
-
-      const result = await this.aiService.ingestManualKnowledgeText(title, content);
-      res.status(200).json({ success: true, data: result });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  };
-
-  /**
-   * POST /api/v1/ai/ingest-db — Ingesti Data Tabel Database
-   */
-  ingestDatabase = async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { records, tableName } = req.body;
-      if (!records || !Array.isArray(records) || !tableName) {
-        res.status(400).json({ success: false, error: "Body request 'records' dan 'tableName' tidak valid!" });
-        return;
-      }
-
-      const result = await this.aiService.ingestCompanyDatabaseRecords(records, tableName);
-      res.status(200).json({ success: true, data: result });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  };
-
-  /**
-   * POST /api/v1/ai/chat — Chat RAG & Multimodal Vision AI
-   */
-  chat = async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { question, imageBase64 } = req.body;
-      if (!question || typeof question !== "string") {
-        res.status(400).json({ success: false, error: "Parameter 'question' wajib diisi!" });
-        return;
-      }
-
-      const result = await this.aiService.generateChatAnswer(question, imageBase64);
-      res.status(200).json({ success: true, data: result });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  };
-
-  /**
-   * POST /api/v1/ai/chat-stream — Streaming Chat Completion SSE
-   */
-  chatStream = async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { question } = req.body;
-      if (!question) {
-        res.status(400).json({ success: false, error: "Parameter 'question' wajib diisi!" });
-        return;
-      }
-
-      // Set Header Server-Sent Events (SSE)
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-
-      await this.aiService.streamChatAnswer(question, (chunkText) => {
-        res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
-      });
-
-      res.write(`data: [DONE]\n\n`);
-      res.end();
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  };
-
-  /**
-   * POST /api/v1/ai/audio/speak — Text-to-Speech (TTS MP3 Stream)
-   */
-  speak = async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { text, voice } = req.body;
-      if (!text) {
-        res.status(400).json({ success: false, error: "Parameter 'text' wajib diisi!" });
-        return;
-      }
-
-      const audioResult = await this.aiService.textToSpeech(text, voice);
-      
-      res.setHeader("Content-Type", audioResult.mimeType);
-      res.send(audioResult.audio);
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  };
-
-  /**
-   * POST /api/v1/ai/audio/transcribe — Speech-to-Text (STT)
-   */
-  transcribe = async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { audioBase64, language } = req.body;
-      if (!audioBase64) {
-        res.status(400).json({ success: false, error: "Parameter 'audioBase64' wajib diisi!" });
-        return;
-      }
-
-      const transcriptResult = await this.aiService.speechToText(audioBase64, language);
-      res.status(200).json({ success: true, data: transcriptResult });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -462,65 +339,50 @@ export class AIController {
 
 ---
 
-## 5. 🛣️ Layer Router (`src/routes/aiRoutes.ts`)
+## 5. 🚥 Layer Router (`src/routes/adminRoutes.ts` & `userRoutes.ts`)
 
 ```typescript
-// src/routes/aiRoutes.ts
+// src/routes/adminRoutes.ts
 import { Router } from "express";
 import multer from "multer";
-import { AIController } from "../controllers/aiController.js";
-
-const upload = multer({ 
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 }
-});
+import { AdminController } from "../controllers/adminController.js";
 
 const router = Router();
-const aiController = new AIController();
+const upload = multer({ storage: multer.memoryStorage() });
+const adminCtrl = new AdminController();
 
-// 📌 Routing 7 API Endpoints Lengkap
-router.post("/ingest-file", upload.single("file"), aiController.ingestFile);
-router.post("/ingest-manual", aiController.ingestManual);
-router.post("/ingest-db", aiController.ingestDatabase);
-router.post("/chat", aiController.chat);
-router.post("/chat-stream", aiController.chatStream);
-router.post("/audio/speak", aiController.speak);
-router.post("/audio/transcribe", aiController.transcribe);
+router.post("/ingest-file", upload.single("file"), adminCtrl.ingestFile);
 
 export default router;
 ```
 
 ---
 
-## 6. 🚦 Main Server Entry Point (`src/server.ts`)
+## 6. 🚀 Entry Point Server Express (`src/server.ts`)
 
 ```typescript
 // src/server.ts
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import aiRoutes from "./routes/aiRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
+import userRoutes from "./routes/userRoutes.js";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(express.json({ limit: "20mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json({ limit: "25mb" }));
 
-app.use("/api/v1/ai", aiRoutes);
+app.use("/api/v1/admin", adminRoutes);
+app.use("/api/v1/user", userRoutes);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Express.js AI Server running on http://localhost:${PORT}`);
-  console.log(`📡 Endpoints:`);
-  console.log(`   - POST http://localhost:${PORT}/api/v1/ai/ingest-file`);
-  console.log(`   - POST http://localhost:${PORT}/api/v1/ai/ingest-manual`);
-  console.log(`   - POST http://localhost:${PORT}/api/v1/ai/ingest-db`);
-  console.log(`   - POST http://localhost:${PORT}/api/v1/ai/chat`);
-  console.log(`   - POST http://localhost:${PORT}/api/v1/ai/chat-stream`);
-  console.log(`   - POST http://localhost:${PORT}/api/v1/ai/audio/speak`);
-  console.log(`   - POST http://localhost:${PORT}/api/v1/ai/audio/transcribe`);
+  console.log(`🚀 Express.js Server running on http://localhost:${PORT}`);
 });
 ```
+
+---
+*Dokumentasi Arsitektur Resmi Express.js (`@badriana/ai-core`)*

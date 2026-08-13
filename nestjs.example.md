@@ -1,28 +1,31 @@
-# 🦁 Panduan Arsitektur Enterprise NestJS: Controller ➔ Service ➔ Repository (Powered by `@badriana/ai-core`)
+# 🦁 Panduan Arsitektur Enterprise NestJS: Modular Controller ➔ Service ➔ Repository (Powered by `@badriana/ai-core`)
 
-Dokumen ini berisi panduan arsitektur **Enterprise Modular Architecture (Controller - Service - Repository / Provider)** untuk aplikasi backend enterprise berbasis **NestJS & TypeScript** yang memanfaatkan paket `@badriana/ai-core` secara 100% komprehensif (Upload File PDF RAG, Ingesti Database 40+ Tabel, Ingesti Teks Knowledge Manual, Multimodal Vision Chat, Streaming Chat SSE, Text-to-Speech MP3, & Speech-to-Text).
+Dokumen ini berisi panduan arsitektur **Enterprise Modular Architecture (Controller - Service - Repository / Provider)** untuk aplikasi backend berbasis **NestJS & TypeScript** yang menggunakan paket `@badriana/ai-core` secara 100% komprehensif, mengadaptasi logika bisnis dari proyek `tes-si-core/backend` ke dalam pola idiomatik NestJS (Dependency Injection, NestJS DTOs, FileInterceptor, RxJS SSE Observables, & Prisma Service).
 
 ---
 
 ## 🏗️ Struktur Folder Proyek Backend NestJS
 
 ```text
-my-nestjs-ai-app/
+tes-si-core-nestjs/
 ├── src/
 │   ├── ai/
 │   │   ├── dto/
 │   │   │   ├── ingest-manual.dto.ts     # DTO Ingesti Teks Manual / SOP
-│   │   │   ├── ingest-database.dto.ts   # DTO Ingesti DB
-│   │   │   ├── chat-query.dto.ts        # DTO Chat RAG
-│   │   │   ├── text-to-speech.dto.ts    # DTO TTS
-│   │   │   └── speech-to-text.dto.ts    # DTO STT
+│   │   │   ├── ingest-database.dto.ts   # DTO Ingesti Baris Database
+│   │   │   ├── chat-query.dto.ts        # DTO Chat RAG & Multimodal
+│   │   │   └── audio-speak.dto.ts       # DTO Text-to-Speech MP3
 │   │   ├── ai.config.ts                 # Provider Single Instance @badriana/ai-core
-│   │   ├── knowledge.repository.ts      # Repository Access Layer (PostgreSQL pgvector)
-│   │   ├── ai.service.ts                # Business Logic Layer @badriana/ai-core
-│   │   ├── ai.controller.ts             # Controller Layer Handler REST API & Multer
-│   │   └── ai.module.ts                 # NestJS Module Definition
+│   │   ├── prisma.service.ts            # NestJS Service Wraps Prisma ORM
+│   │   ├── knowledge.repository.ts      # Repository Layer (Cos Similarity Vector Search)
+│   │   ├── ai.service.ts                # Service Layer Logika Bisnis Utama
+│   │   ├── admin.controller.ts          # Controller Admin (Ingesti File, Manual, DB)
+│   │   ├── user.controller.ts           # Controller User (Chat RAG, SSE Stream, TTS, STT)
+│   │   └── ai.module.ts                 # NestJS Feature Module
 │   ├── app.module.ts                    # Root Module Aplikasi NestJS
 │   └── main.ts                          # Bootstrap Entry Point NestJS
+├── prisma/
+│   └── schema.prisma                    # Skema Tabel Document & KnowledgeChunk
 ├── package.json
 ├── tsconfig.json
 └── .env
@@ -32,15 +35,18 @@ my-nestjs-ai-app/
 
 ## 1. ⚙️ Provider Konfigurasi AI Client (`src/ai/ai.config.ts`)
 
+Menggunakan NestJS `@Injectable()` provider untuk mengelola client `@badriana/ai-core`:
+
 ```typescript
 // src/ai/ai.config.ts
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { createAI, Client } from "@badriana/ai-core";
+import { createAI } from "@badriana/ai-core";
 
 @Injectable()
 export class AIConfigProvider {
-  public readonly client: Client;
+  public readonly ai: ReturnType<typeof createAI>;
+  public readonly aiAudio: ReturnType<typeof createAI>;
 
   constructor(private configService: ConfigService) {
     const apiKey = this.configService.get<string>("OPENROUTER_API_KEY");
@@ -48,12 +54,17 @@ export class AIConfigProvider {
       throw new Error("❌ OPENROUTER_API_KEY belum diset pada environment variables (.env)!");
     }
 
-    this.client = createAI({
+    this.ai = createAI({
       provider: "openrouter",
       apiKey,
-      chatModel: "google/gemma-2-9b-it:free",
-      embeddingModel: "openai/text-embedding-3-small",
-      visionModel: "meta-llama/llama-3.2-11b-vision-instruct:free",
+      chatModel: this.configService.get<string>("AI_CHAT_MODEL") || "google/gemma-2-9b-it:free",
+      embeddingModel: this.configService.get<string>("AI_EMBEDDING_MODEL") || "openai/text-embedding-3-small",
+      visionModel: this.configService.get<string>("AI_VISION_MODEL") || "meta-llama/llama-3.2-11b-vision-instruct:free",
+    });
+
+    this.aiAudio = createAI({
+      provider: "openai",
+      apiKey: this.configService.get<string>("OPENAI_API_KEY") || apiKey,
     });
   }
 }
@@ -63,337 +74,218 @@ export class AIConfigProvider {
 
 ## 2. 🗄️ Layer Repository (`src/ai/knowledge.repository.ts`)
 
+Layer repository NestJS menggunakan PrismaService untuk menyimpan Vektor Chunks dan menghitung Cosine Similarity:
+
 ```typescript
 // src/ai/knowledge.repository.ts
-import { Injectable, OnModuleDestroy } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
-import { Pool } from "pg";
-import type { Chunk } from "@badriana/ai-core";
+import { Injectable } from "@nestjs/common";
+import { PrismaService } from "./prisma.service";
 
 export interface VectorChunkRecord {
   id: string;
-  documentId?: string;
+  documentId?: string | null;
+  type: string;
   content: string;
   similarityScore: number;
+  imageUrl?: string | null;
+  imagePage?: number | null;
 }
 
 @Injectable()
-export class KnowledgeRepository implements OnModuleDestroy {
-  private pgPool: Pool;
+export class KnowledgeRepository {
+  constructor(private prisma: PrismaService) {}
 
-  constructor(private configService: ConfigService) {
-    this.pgPool = new Pool({
-      connectionString: this.configService.get<string>("DATABASE_URL"),
-    });
-  }
-
-  onModuleDestroy() {
-    this.pgPool.end();
-  }
-
-  async saveChunks(documentId: string, chunks: Chunk[]): Promise<void> {
-    const client = await this.pgPool.connect();
-    try {
-      await client.query("BEGIN");
-      for (const chunk of chunks) {
-        const query = `
-          INSERT INTO knowledge_chunks (id, document_id, content, embedding)
-          VALUES ($1, $2, $3, $4::vector)
-          ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding;
-        `;
-        await client.query(query, [
-          chunk.id,
+  async saveChunks(
+    documentId: string | null,
+    chunks: readonly {
+      id: string;
+      content: string;
+      type?: string;
+      embedding?: readonly number[];
+      imageUrl?: string | null;
+      imagePage?: number | null;
+    }[]
+  ): Promise<void> {
+    for (const chunk of chunks) {
+      const emb = chunk.embedding ? Array.from(chunk.embedding) : [];
+      await this.prisma.knowledgeChunk.upsert({
+        where: { id: chunk.id },
+        update: {
+          content: chunk.content,
+          embedding: JSON.stringify(emb),
           documentId,
-          chunk.content,
-          JSON.stringify(chunk.embedding),
-        ]);
-      }
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
+          type: chunk.type ?? "text",
+          imageUrl: chunk.imageUrl ?? null,
+          imagePage: chunk.imagePage ?? null,
+        },
+        create: {
+          id: chunk.id,
+          documentId,
+          type: chunk.type ?? "text",
+          content: chunk.content,
+          embedding: JSON.stringify(emb),
+          imageUrl: chunk.imageUrl ?? null,
+          imagePage: chunk.imagePage ?? null,
+        },
+      });
     }
   }
 
   async searchSimilarChunks(questionVector: number[], limit: number = 5): Promise<VectorChunkRecord[]> {
-    const query = `
-      SELECT id, document_id AS "documentId", content, 1 - (embedding <=> $1::vector) AS "similarityScore"
-      FROM knowledge_chunks
-      ORDER BY embedding <=> $1::vector
-      LIMIT $2;
-    `;
-    const result = await this.pgPool.query(query, [JSON.stringify(questionVector), limit]);
-    return result.rows;
+    const allChunks = await this.prisma.knowledgeChunk.findMany();
+
+    const scoredChunks = allChunks.map((chunk) => {
+      let chunkVector: number[] = [];
+      try {
+        chunkVector = JSON.parse(chunk.embedding);
+      } catch (e) {
+        chunkVector = [];
+      }
+
+      const score = this.calculateCosineSimilarity(questionVector, chunkVector);
+      return {
+        id: chunk.id,
+        documentId: chunk.documentId,
+        type: chunk.type,
+        content: chunk.content,
+        similarityScore: score,
+        imageUrl: chunk.imageUrl,
+        imagePage: chunk.imagePage,
+      };
+    });
+
+    scoredChunks.sort((a, b) => b.similarityScore - a.similarityScore);
+    return scoredChunks.slice(0, limit);
+  }
+
+  private calculateCosineSimilarity(vecA: number[], vecB: number[]): number {
+    if (!vecA.length || !vecB.length || vecA.length !== vecB.length) return 0;
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+      const a = vecA[i] ?? 0;
+      const b = vecB[i] ?? 0;
+      dotProduct += a * b;
+      normA += a * a;
+      normB += b * b;
+    }
+    if (normA === 0 || normB === 0) return 0;
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 }
 ```
 
 ---
 
-## 3. 📝 Data Transfer Objects (DTO) Validation
+## 3. 🧠 Layer Service (`src/ai/ai.service.ts`)
 
-```typescript
-// src/ai/dto/ingest-manual.dto.ts
-import { IsNotEmpty, IsString } from "class-validator";
-
-export class IngestManualDto {
-  @IsString()
-  @IsNotEmpty()
-  title: string;
-
-  @IsString()
-  @IsNotEmpty()
-  content: string;
-}
-
-// src/ai/dto/ingest-database.dto.ts
-import { IsArray, IsNotEmpty, IsString } from "class-validator";
-
-export class IngestDatabaseDto {
-  @IsArray()
-  @IsNotEmpty()
-  records: Record<string, any>[];
-
-  @IsString()
-  @IsNotEmpty()
-  tableName: string;
-}
-
-// src/ai/dto/chat-query.dto.ts
-import { IsNotEmpty, IsOptional, IsString } from "class-validator";
-
-export class ChatQueryDto {
-  @IsString()
-  @IsNotEmpty()
-  question: string;
-
-  @IsString()
-  @IsOptional()
-  imageBase64?: string;
-}
-
-// src/ai/dto/text-to-speech.dto.ts
-import { IsNotEmpty, IsOptional, IsString, IsIn } from "class-validator";
-
-export class TextToSpeechDto {
-  @IsString()
-  @IsNotEmpty()
-  text: string;
-
-  @IsString()
-  @IsOptional()
-  @IsIn(["alloy", "echo", "fable", "onyx", "nova", "shimmer"])
-  voice?: "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer";
-}
-
-// src/ai/dto/speech-to-text.dto.ts
-import { IsNotEmpty, IsOptional, IsString } from "class-validator";
-
-export class SpeechToTextDto {
-  @IsString()
-  @IsNotEmpty()
-  audioBase64: string;
-
-  @IsString()
-  @IsOptional()
-  language?: string;
-}
-```
-
----
-
-## 4. 🧠 Layer Service (`src/ai/ai.service.ts`)
+Injectable NestJS Service yang mengeksekusi pipeline ingesti `createDocument` dan RAG chat `ai.chat.generate`:
 
 ```typescript
 // src/ai/ai.service.ts
-import { Injectable, InternalServerErrorException } from "@nestjs/common";
-import { 
-  createDocument, 
-  createQuery, 
-  formatDataRecordsForIngestion 
-} from "@badriana/ai-core";
-import { AIConfigProvider } from "./ai.config.js";
-import { KnowledgeRepository } from "./knowledge.repository.js";
-import { IngestManualDto } from "./dto/ingest-manual.dto.js";
-import { IngestDatabaseDto } from "./dto/ingest-database.dto.js";
-import { ChatQueryDto } from "./dto/chat-query.dto.js";
-import { TextToSpeechDto } from "./dto/text-to-speech.dto.js";
-import { SpeechToTextDto } from "./dto/speech-to-text.dto.js";
+import { Injectable } from "@nestjs/common";
+import { createDocument } from "@badriana/ai-core";
+import { AIConfigProvider } from "./ai.config";
+import { KnowledgeRepository } from "./knowledge.repository";
+import { PrismaService } from "./prisma.service";
+import { Observable } from "rxjs";
+
+const RAG_MIN_SCORE = 0.15;
 
 @Injectable()
 export class AIService {
   constructor(
-    private readonly aiConfig: AIConfigProvider,
-    private readonly knowledgeRepo: KnowledgeRepository
+    private aiConfig: AIConfigProvider,
+    private knowledgeRepo: KnowledgeRepository,
+    private prisma: PrismaService,
   ) {}
 
+  private async getEmbeddings(texts: readonly string[]): Promise<number[][]> {
+    const embRes = await this.aiConfig.ai.embedding.create({ input: texts });
+    return "embeddings" in embRes
+      ? embRes.embeddings.map((e) => Array.from(e))
+      : [Array.from(embRes.embedding)];
+  }
+
   /**
-   * 1. Ingesti Berkas PDF/Teks
+   * 1. Ingesti Berkas PDF/TXT yang diunggah via Express/NestJS Multer Buffer
    */
   async ingestUploadedFile(fileBuffer: Buffer, filename: string) {
-    try {
-      const docResult = await createDocument({
-        source: fileBuffer,
-        filename,
-        embedder: async (texts) => {
-          const embRes = await this.aiConfig.client.embedding.create({ input: texts });
-          return "embeddings" in embRes ? embRes.embeddings : [embRes.embedding];
-        },
-      });
+    const docMeta = await this.prisma.document.create({ data: { filename } });
 
-      await this.knowledgeRepo.saveChunks(docResult.document.id, docResult.chunks);
+    const docResult = await createDocument({
+      source: fileBuffer,
+      filename,
+      filterCoverImages: false,
+      minImageDimension: 80,
+      embedder: async (texts) => await this.getEmbeddings(texts),
+    });
 
-      return {
-        documentId: docResult.document.id,
-        chunksCount: docResult.chunks.length,
-        stats: docResult.stats,
-      };
-    } catch (error: any) {
-      throw new InternalServerErrorException(`Gagal meng-ingest file: ${error.message}`);
-    }
+    const chunksToSave = docResult.chunks.map((chunk) => ({
+      id: chunk.id,
+      content: chunk.content,
+      embedding: chunk.embedding,
+      type: chunk.type,
+      imageUrl: null,
+      imagePage: null,
+    }));
+
+    await this.knowledgeRepo.saveChunks(docMeta.id, chunksToSave);
+    return { document: docMeta, stats: docResult.stats, chunksCount: chunksToSave.length };
   }
 
   /**
-   * 2. Ingesti Teks Knowledge Manual / SOP
+   * 2. Tanya Jawab AI Chat RAG
    */
-  async ingestManualKnowledgeText(dto: IngestManualDto) {
-    try {
-      const docResult = await createDocument({
-        source: dto.content,
-        filename: `${dto.title.replace(/\s+/g, "_")}.txt`,
-        embedder: async (texts) => {
-          const embRes = await this.aiConfig.client.embedding.create({ input: texts });
-          return "embeddings" in embRes ? embRes.embeddings : [embRes.embedding];
-        },
-      });
+  async generateChatAnswer(question: string) {
+    const questionEmbeddings = await this.getEmbeddings([question]);
+    const questionVector = questionEmbeddings[0] ?? [];
 
-      await this.knowledgeRepo.saveChunks(docResult.document.id, docResult.chunks);
+    const similarChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 5);
+    const relevantChunks = similarChunks.filter((c) => c.similarityScore >= RAG_MIN_SCORE);
 
-      return {
-        documentId: docResult.document.id,
-        chunksCount: docResult.chunks.length,
-        stats: docResult.stats,
-      };
-    } catch (error: any) {
-      throw new InternalServerErrorException(`Gagal meng-ingest teks manual: ${error.message}`);
-    }
-  }
+    const contexts = relevantChunks.map((c) => ({
+      id: c.id,
+      content: c.content,
+      source: { filename: `Document ${c.documentId ?? 'Knowledge'}` },
+    }));
 
-  /**
-   * 3. Ingesti Data Tabel Database
-   */
-  async ingestDatabaseRecords(dto: IngestDatabaseDto) {
-    try {
-      const formattedText = formatDataRecordsForIngestion(dto.records, {
-        recordTitlePrefix: `[Record Tabel ${dto.tableName}]`,
-        excludeKeys: ["password", "secret", "auth_token", "credit_card"],
-      });
-
-      const docResult = await createDocument({
-        source: formattedText,
-        filename: `db_table_${dto.tableName}.txt`,
-        embedder: async (texts) => {
-          const embRes = await this.aiConfig.client.embedding.create({ input: texts });
-          return "embeddings" in embRes ? embRes.embeddings : [embRes.embedding];
-        },
-      });
-
-      await this.knowledgeRepo.saveChunks(docResult.document.id, docResult.chunks);
-
-      return {
-        tableName: dto.tableName,
-        recordsProcessed: dto.records.length,
-        chunksGenerated: docResult.chunks.length,
-      };
-    } catch (error: any) {
-      throw new InternalServerErrorException(`Gagal meng-ingest tabel database: ${error.message}`);
-    }
-  }
-
-  /**
-   * 4. Multimodal Vision Chat & RAG
-   */
-  async generateChatAnswer(dto: ChatQueryDto) {
-    try {
-      const embRes = await this.aiConfig.client.embedding.create({ input: dto.question });
-      const questionVector = "embedding" in embRes ? embRes.embedding : embRes.embeddings[0]!;
-
-      const candidateChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 10);
-
-      const queryResult = createQuery({
-        vector: questionVector,
-        keyword: dto.question,
-        chunks: candidateChunks.map((c) => ({
-          id: c.id,
-          type: "text",
-          index: 0,
-          startOffset: 0,
-          endOffset: c.content.length,
-          content: c.content,
-        })),
-        limit: 5,
-      });
-
-      const chatOutput = await this.aiConfig.client.chat.generate({
-        question: dto.question,
-        contexts: queryResult.rankedChunks,
-        images: dto.imageBase64 ? [{ dataUrl: dto.imageBase64 }] : undefined,
-      });
-
-      return {
-        answer: chatOutput.text,
-        imageAnalysis: chatOutput.imageAnalysis,
-        citations: chatOutput.citations,
-        usage: chatOutput.usage,
-        raw: chatOutput.raw,
-      };
-    } catch (error: any) {
-      throw new InternalServerErrorException(`Gagal memproses chat AI: ${error.message}`);
-    }
-  }
-
-  /**
-   * 5. Streaming Chat SSE
-   */
-  async streamChatAnswer(question: string, onChunk: (text: string) => void) {
-    const embRes = await this.aiConfig.client.embedding.create({ input: question });
-    const questionVector = "embedding" in embRes ? embRes.embedding : embRes.embeddings[0]!;
-
-    const candidateChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 5);
-
-    return await this.aiConfig.client.chat.stream({
+    const answer = await this.aiConfig.ai.chat.generate({
       question,
-      contexts: candidateChunks.map((c) => ({
-        id: c.id,
-        type: "text",
-        index: 0,
-        startOffset: 0,
-        endOffset: c.content.length,
-        content: c.content,
-      })),
-      onChunk: (chunk) => onChunk(chunk.text),
+      contexts,
     });
+
+    return {
+      answer: answer.text,
+      model: answer.model,
+      usage: answer.usage,
+      citations: answer.citations,
+    };
   }
 
   /**
-   * 6. Text-to-Speech
+   * 3. Streaming SSE Chat RAG via RxJS Observable
    */
-  async textToSpeech(dto: TextToSpeechDto) {
-    return await this.aiConfig.client.audio.speak({
-      text: dto.text,
-      voice: dto.voice ?? "nova",
-    });
-  }
+  streamChatAnswer(question: string): Observable<MessageEvent> {
+    return new Observable((subscriber) => {
+      (async () => {
+        try {
+          const questionEmbeddings = await this.getEmbeddings([question]);
+          const questionVector = questionEmbeddings[0] ?? [];
+          const similarChunks = await this.knowledgeRepo.searchSimilarChunks(questionVector, 5);
+          const contexts = similarChunks.map((c) => ({ id: c.id, content: c.content }));
 
-  /**
-   * 7. Speech-to-Text
-   */
-  async speechToText(dto: SpeechToTextDto) {
-    return await this.aiConfig.client.audio.transcribe({
-      file: dto.audioBase64,
-      language: dto.language ?? "id",
+          const stream = await this.aiConfig.ai.chat.stream({ question, contexts });
+          for await (const chunk of stream) {
+            subscriber.next({ data: JSON.stringify({ text: chunk.text }) } as MessageEvent);
+          }
+          subscriber.next({ data: '[DONE]' } as MessageEvent);
+          subscriber.complete();
+        } catch (err: any) {
+          subscriber.error(err);
+        }
+      })();
     });
   }
 }
@@ -401,86 +293,97 @@ export class AIService {
 
 ---
 
-## 5. 🎮 Layer Controller (`src/ai/ai.controller.ts`)
+## 4. 🎮 Layer Controller (`src/ai/admin.controller.ts` & `user.controller.ts`)
+
+Menggunakan dekorator standar NestJS `@Controller`, `@Post`, `@UploadedFile`, `@UseInterceptors(FileInterceptor)`:
 
 ```typescript
-// src/ai/ai.controller.ts
-import { 
-  Controller, 
-  Post, 
-  Body, 
-  UseInterceptors, 
-  UploadedFile, 
-  BadRequestException,
-  Res,
-  HttpStatus 
-} from "@nestjs/common";
+// src/ai/admin.controller.ts
+import { Controller, Post, UseInterceptors, UploadedFile, BadRequestException } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
-import { Response } from "express";
-import { AIService } from "./ai.service.js";
-import { IngestManualDto } from "./dto/ingest-manual.dto.js";
-import { IngestDatabaseDto } from "./dto/ingest-database.dto.js";
-import { ChatQueryDto } from "./dto/chat-query.dto.js";
-import { TextToSpeechDto } from "./dto/text-to-speech.dto.js";
-import { SpeechToTextDto } from "./dto/speech-to-text.dto.js";
+import { AIService } from "./ai.service";
 
-@Controller("ai")
-export class AIController {
+@Controller("api/v1/admin")
+export class AdminController {
   constructor(private readonly aiService: AIService) {}
 
   @Post("ingest-file")
   @UseInterceptors(FileInterceptor("file"))
   async ingestFile(@UploadedFile() file: Express.Multer.File) {
     if (!file) {
-      throw new BadRequestException("File PDF/Teks wajib diunggah!");
+      throw new BadRequestException("File PDF/TXT wajib diunggah!");
     }
-    const data = await this.aiService.ingestUploadedFile(file.buffer, file.originalname);
-    return { success: true, data };
-  }
-
-  @Post("ingest-manual")
-  async ingestManual(@Body() dto: IngestManualDto) {
-    const data = await this.aiService.ingestManualKnowledgeText(dto);
-    return { success: true, data };
-  }
-
-  @Post("ingest-db")
-  async ingestDatabase(@Body() dto: IngestDatabaseDto) {
-    const data = await this.aiService.ingestDatabaseRecords(dto);
-    return { success: true, data };
-  }
-
-  @Post("chat")
-  async chat(@Body() dto: ChatQueryDto) {
-    const data = await this.aiService.generateChatAnswer(dto);
-    return { success: true, data };
-  }
-
-  @Post("chat-stream")
-  async chatStream(@Body() dto: ChatQueryDto, @Res() res: Response) {
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-
-    await this.aiService.streamChatAnswer(dto.question, (chunkText) => {
-      res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
-    });
-
-    res.write(`data: [DONE]\n\n`);
-    res.end();
-  }
-
-  @Post("audio/speak")
-  async speak(@Body() dto: TextToSpeechDto, @Res() res: Response) {
-    const audioResult = await this.aiService.textToSpeech(dto);
-    res.setHeader("Content-Type", audioResult.mimeType);
-    res.status(HttpStatus.OK).send(audioResult.audio);
-  }
-
-  @Post("audio/transcribe")
-  async transcribe(@Body() dto: SpeechToTextDto) {
-    const data = await this.aiService.speechToText(dto);
-    return { success: true, data };
+    const result = await this.aiService.ingestUploadedFile(file.buffer, file.originalname);
+    return { success: true, data: result };
   }
 }
 ```
+
+```typescript
+// src/ai/user.controller.ts
+import { Controller, Post, Body, Sse, MessageEvent } from "@nestjs/common";
+import { AIService } from "./ai.service";
+import { ChatQueryDto } from "./dto/chat-query.dto";
+import { Observable } from "rxjs";
+
+@Controller("api/v1/user")
+export class UserController {
+  constructor(private readonly aiService: AIService) {}
+
+  @Post("chat")
+  async chat(@Body() dto: ChatQueryDto) {
+    const result = await this.aiService.generateChatAnswer(dto.question);
+    return { success: true, data: result };
+  }
+
+  @Sse("chat-stream")
+  chatStream(@Body() dto: ChatQueryDto): Observable<MessageEvent> {
+    return this.aiService.streamChatAnswer(dto.question);
+  }
+}
+```
+
+---
+
+## 5. 🧱 Module Definition & Bootstrap Main (`src/ai/ai.module.ts` & `src/main.ts`)
+
+```typescript
+// src/ai/ai.module.ts
+import { Module } from "@nestjs/common";
+import { ConfigModule } from "@nestjs/config";
+import { AIConfigProvider } from "./ai.config";
+import { PrismaService } from "./prisma.service";
+import { KnowledgeRepository } from "./knowledge.repository";
+import { AIService } from "./ai.service";
+import { AdminController } from "./admin.controller";
+import { UserController } from "./user.controller";
+
+@Module({
+  imports: [ConfigModule.forRoot()],
+  controllers: [AdminController, UserController],
+  providers: [AIConfigProvider, PrismaService, KnowledgeRepository, AIService],
+  exports: [AIService],
+})
+export class AIModule {}
+```
+
+```typescript
+// src/main.ts
+import { NestFactory } from "@nestjs/core";
+import { ValidationPipe } from "@nestjs/common";
+import { AppModule } from "./app.module";
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.enableCors({ origin: true, credentials: true });
+  app.useGlobalPipes(new ValidationPipe({ transform: true }));
+
+  const port = process.env.PORT || 3000;
+  await app.listen(port);
+  console.log(`🚀 NestJS Backend Server running on http://localhost:${port}`);
+}
+bootstrap();
+```
+
+---
+*Dokumentasi Arsitektur Resmi NestJS (`@badriana/ai-core`)*
